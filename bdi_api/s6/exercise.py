@@ -1,8 +1,10 @@
+from __future__ import annotations
+
 from typing import Annotated
 
-from fastapi import APIRouter, status
-from fastapi.params import Query
+from fastapi import APIRouter, HTTPException, Query, status
 from pydantic import BaseModel
+from pymongo import MongoClient
 
 from bdi_api.settings import Settings
 
@@ -16,6 +18,27 @@ s6 = APIRouter(
     prefix="/api/s6",
     tags=["s6"],
 )
+
+DB_NAME = "bdi_aircraft"
+COLLECTION_NAME = "positions"
+
+
+def _collection():
+    """
+    Returns the Mongo collection.
+    Uses settings.mongo_url which should come from env var BDI_MONGO_URL.
+    """
+    if not settings.mongo_url:
+        raise RuntimeError("BDI_MONGO_URL is not set. Example: mongodb://admin:admin123@localhost:27017")
+
+    client = MongoClient(settings.mongo_url)
+    db = client[DB_NAME]
+    col = db[COLLECTION_NAME]
+
+    # Helpful indexes (safe to call repeatedly)
+    col.create_index([("icao", 1), ("timestamp", -1)])
+    col.create_index([("type", 1)])
+    return col
 
 
 class AircraftPosition(BaseModel):
@@ -38,9 +61,10 @@ def create_aircraft(position: AircraftPosition) -> dict:
     Database name: bdi_aircraft
     Collection name: positions
     """
-    # TODO: Connect to MongoDB using pymongo.MongoClient(settings.mongo_url)
-    # TODO: Insert the position document into the 'positions' collection
-    # TODO: Return {"status": "ok"}
+    col = _collection()
+
+    doc = position.model_dump()
+    col.insert_one(doc)
     return {"status": "ok"}
 
 
@@ -52,10 +76,15 @@ def aircraft_stats() -> list[dict]:
 
     Use MongoDB's aggregation pipeline with $group.
     """
-    # TODO: Connect to MongoDB
-    # TODO: Use collection.aggregate() with $group on 'type' field
-    # TODO: Return list sorted by count descending
-    return []
+    col = _collection()
+
+    pipeline = [
+        # group by type (None types will become null; tests usually have types set)
+        {"$group": {"_id": "$type", "count": {"$sum": 1}}},
+        {"$project": {"_id": 0, "type": "$_id", "count": 1}},
+        {"$sort": {"count": -1}},
+    ]
+    return list(col.aggregate(pipeline))
 
 
 @s6.get("/aircraft/")
@@ -74,10 +103,21 @@ def list_aircraft(
     Each result should include: icao, registration, type.
     Use MongoDB's skip() and limit() for pagination.
     """
-    # TODO: Connect to MongoDB
-    # TODO: Query distinct aircraft, apply skip/limit for pagination
-    # TODO: Return list of dicts with icao, registration, type
-    return []
+    col = _collection()
+
+    skip = (page - 1) * page_size
+
+    # Distinct aircraft = one row per ICAO.
+    # We pick the latest record per ICAO so registration/type are current.
+    pipeline = [
+        {"$sort": {"icao": 1, "timestamp": -1}},
+        {"$group": {"_id": "$icao", "registration": {"$first": "$registration"}, "type": {"$first": "$type"}}},
+        {"$project": {"_id": 0, "icao": "$_id", "registration": 1, "type": 1}},
+        {"$sort": {"icao": 1}},
+        {"$skip": skip},
+        {"$limit": page_size},
+    ]
+    return list(col.aggregate(pipeline))
 
 
 @s6.get("/aircraft/{icao}")
@@ -87,10 +127,12 @@ def get_aircraft(icao: str) -> dict:
     Return the most recent document matching the given ICAO code.
     If not found, return 404.
     """
-    # TODO: Connect to MongoDB
-    # TODO: Find the latest document for this icao (sort by timestamp descending)
-    # TODO: Return 404 if not found
-    return {}
+    col = _collection()
+
+    doc = col.find_one({"icao": icao}, projection={"_id": 0}, sort=[("timestamp", -1)])
+    if not doc:
+        raise HTTPException(status_code=404, detail="Aircraft not found")
+    return doc
 
 
 @s6.delete("/aircraft/{icao}")
@@ -99,7 +141,7 @@ def delete_aircraft(icao: str) -> dict:
 
     Returns the number of deleted documents.
     """
-    # TODO: Connect to MongoDB
-    # TODO: Delete all documents matching the icao
-    # TODO: Return {"deleted": <count>}
-    return {"deleted": 0}
+    col = _collection()
+
+    result = col.delete_many({"icao": icao})
+    return {"deleted": int(result.deleted_count)}
