@@ -34,5 +34,8 @@ venv
 .report.json
 .pytest.json
 
+ HEAD
 awscliv2.zip
 aws
+CLAUDE.md
+upstream/main
