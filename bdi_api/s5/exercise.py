@@ -8,7 +8,7 @@ from bdi_api.settings import Settings
 
 settings = Settings()
 
-engine = create_engine(settings.BDI_DB_URL, future=True)
+engine = create_engine(settings.db_url, future=True)
 
 s5 = APIRouter(
     responses={
